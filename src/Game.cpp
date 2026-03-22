@@ -34,7 +34,6 @@ bool Game::init() {
     }
 
     tileMap.init();
-
     player.init(25 * Constants::TILE_SIZE, 19 * Constants::TILE_SIZE);
 
     camera.x = player.x - Constants::SCREEN_WIDTH / 2.0f;
@@ -58,13 +57,12 @@ void Game::run() {
         Uint64 now = SDL_GetPerformanceCounter();
         float dt = (float)(now - lastTime) / freq;
         lastTime = now;
-
         dt = std::min(dt, 0.05f);
 
         input.update();
 
         if (input.isKeyPressed(SDL_SCANCODE_ESCAPE) && state == GameState::EXPLORE &&
-            !dialogueSystem.isActive() && !mappingSystem.active) {
+            !dialogueSystem.isActive() && !livingMap.active) {
             break;
         }
 
@@ -84,7 +82,6 @@ void Game::update(float dt) {
     gameTime += dt;
     stateTime += dt;
 
-    // Fade logic
     if (fadeAlpha != fadeTarget) {
         float dir = (fadeTarget > fadeAlpha) ? 1.0f : -1.0f;
         fadeAlpha += dir * fadeSpeed * dt;
@@ -100,6 +97,19 @@ void Game::update(float dt) {
 
     particles.update(dt);
     camera.updateShake(dt);
+    emotions.update(dt);
+
+    livingMap.updateManifestations(tileMap, particles, camera, dt);
+
+    if (livingMap.hasConsequences()) {
+        auto cons = livingMap.getLatestConsequence();
+        if (!cons.resolved) {
+            consequenceText = cons.description;
+            consequenceTimer = 4.0f;
+            for (auto& c : livingMap.consequences) c.resolved = true;
+        }
+    }
+    if (consequenceTimer > 0) consequenceTimer -= dt;
 
     switch (state) {
         case GameState::INTRO:   updateIntro(dt);   break;
@@ -188,9 +198,7 @@ void Game::renderIntro() {
 
     if (titleFont) {
         float titleAlpha = std::min(stateTime * 2.0f, 1.0f);
-        Constants::Colors::Color titleColor = {
-            210, 170, 60, (unsigned char)(255 * titleAlpha)
-        };
+        Constants::Colors::Color titleColor = {210, 170, 60, (unsigned char)(255 * titleAlpha)};
         renderer.drawTextCentered("The Cartographer of Unmade Places", 80, titleColor, titleFont);
     }
 
@@ -225,6 +233,19 @@ void Game::updateExplore(float dt) {
 
     voidSystem.update(tileMap, particles, camera, dt);
 
+    // Void proximity triggers fear
+    for (int dx = -3; dx <= 3; dx++) {
+        for (int dy = -3; dy <= 3; dy++) {
+            if (tileMap.isVoid(player.tileX() + dx, player.tileY() + dy)) {
+                float dist = sqrt((float)(dx*dx + dy*dy));
+                if (dist < 2.0f) {
+                    emotions.trigger(Emotion::FEARFUL, 0.002f);
+                }
+                break;
+            }
+        }
+    }
+
     // Ink motes around Sable
     inkMoteTimer += dt;
     if (inkMoteTimer > 0.5f) {
@@ -241,18 +262,24 @@ void Game::updateExplore(float dt) {
                 player.addInk(nearest->inkReward);
             }
             nearest->talked = true;
+
+            // Talking to NPCs can shift emotions
+            if (nearest->name.find("Child") != std::string::npos) {
+                emotions.trigger(Emotion::HOPEFUL, 0.3f);
+            } else if (nearest->name.find("Cartographer") != std::string::npos) {
+                emotions.trigger(Emotion::DETERMINED, 0.4f);
+            }
         }
     }
 
-    // Enter mapping mode
+    // Enter Living Map mode
     if (input.isKeyPressed(SDL_SCANCODE_M) || input.isKeyPressed(SDL_SCANCODE_TAB)) {
-        mappingSystem.enter(player.tileX(), player.tileY());
+        livingMap.enter(player.tileX(), player.tileY(), emotions);
         state = GameState::MAPPING;
         stateTime = 0;
     }
 
-    // Check for ending trigger
-    if (voidSystem.shouldTriggerEnding(tileMap, mappingSystem.tilesRevealed)) {
+    if (voidSystem.shouldTriggerEnding(tileMap, livingMap.tilesRevealed)) {
         startFadeTo(GameState::ENDING, 0.8f);
     }
 }
@@ -264,12 +291,37 @@ void Game::renderExplore() {
         npc.render(renderer, camera, gameTime, assets);
 
     player.render(renderer, camera, gameTime);
-
     particles.render(renderer, camera);
 
-    // Interaction prompt
-    NPC* nearest = getNearestInteractableNPC();
+    // Render drawn labels in the world (from Living Map)
     TTF_Font* smallFont = assets.getFont("small");
+    if (smallFont) {
+        for (auto& region : livingMap.regions) {
+            if (!region.hasLabel || !region.fullyManifested) continue;
+            float sx = camera.screenX(region.centerTX * Constants::TILE_SIZE) + camera.shakeOffsetX();
+            float sy = camera.screenY(region.centerTY * Constants::TILE_SIZE) + camera.shakeOffsetY();
+            renderer.drawText(region.label, (int)(sx - region.label.size() * 3),
+                (int)(sy - 20), Constants::Colors::LABEL_TEXT, smallFont);
+        }
+    }
+
+    // Void memory ghosts: faint outlines of consumed tiles
+    for (int x = 0; x < tileMap.width(); x++) {
+        for (int y = 0; y < tileMap.height(); y++) {
+            if (!tileMap.isVoid(x, y)) continue;
+            if (!voidSystem.hasMemoryOf(x, y)) continue;
+            float strength = voidSystem.getMemoryStrength(x, y);
+            float sx = camera.screenX(x * Constants::TILE_SIZE) + camera.shakeOffsetX();
+            float sy = camera.screenY(y * Constants::TILE_SIZE) + camera.shakeOffsetY();
+            unsigned char alpha = (unsigned char)(40 * strength);
+            renderer.drawRect(sx + 2, sy + 2, Constants::TILE_SIZE - 4,
+                Constants::TILE_SIZE - 4, {100, 90, 80, alpha});
+        }
+    }
+
+    emotions.renderOverlay(renderer, gameTime);
+
+    NPC* nearest = getNearestInteractableNPC();
     if (nearest && smallFont) {
         float sx = camera.screenX(nearest->centerX()) - 25;
         float sy = camera.screenY(nearest->y) - 35;
@@ -278,22 +330,23 @@ void Game::renderExplore() {
     }
 
     renderUI();
-    mappingSystem.renderMinimap(renderer, tileMap, player);
+    livingMap.renderMinimap(renderer, tileMap, player);
     dialogueSystem.render(renderer, assets);
+    renderConsequenceNotification();
 }
 
 // --- MAPPING ---
 
 void Game::updateMapping(float dt) {
-    mappingSystem.update(input, tileMap, player, particles, camera, dt);
+    livingMap.update(input, tileMap, player, particles, camera, emotions, dt, gameTime);
 
-    if (!mappingSystem.active) {
+    if (!livingMap.active) {
         state = GameState::EXPLORE;
         stateTime = 0;
     }
 
-    if (voidSystem.shouldTriggerEnding(tileMap, mappingSystem.tilesRevealed)) {
-        mappingSystem.exit();
+    if (voidSystem.shouldTriggerEnding(tileMap, livingMap.tilesRevealed)) {
+        livingMap.exit();
         startFadeTo(GameState::ENDING, 0.8f);
     }
 }
@@ -307,9 +360,10 @@ void Game::renderMapping() {
     player.render(renderer, camera, gameTime);
     particles.render(renderer, camera);
 
-    mappingSystem.render(renderer, camera, assets, gameTime);
+    livingMap.render(renderer, camera, assets, emotions, gameTime);
+    emotions.renderOverlay(renderer, gameTime);
     renderUI();
-    mappingSystem.renderMinimap(renderer, tileMap, player);
+    renderConsequenceNotification();
 }
 
 // --- ENDING ---
@@ -317,18 +371,10 @@ void Game::renderMapping() {
 void Game::updateEnding(float dt) {
     endingTimer += dt;
 
-    if (endingTimer > 2.0f && endingPhase == 0)
-        endingPhase = 1;
-    if (endingTimer > 6.0f && endingPhase == 1)
-        endingPhase = 2;
-    if (endingTimer > 12.0f && endingPhase == 2)
-        endingPhase = 3;
-    if (endingTimer > 18.0f && endingPhase == 3)
-        endingPhase = 4;
-
-    if (endingPhase >= 4 && input.isKeyPressed(SDL_SCANCODE_RETURN)) {
-        // Could restart or quit
-    }
+    if (endingTimer > 2.0f && endingPhase == 0)  endingPhase = 1;
+    if (endingTimer > 6.0f && endingPhase == 1)  endingPhase = 2;
+    if (endingTimer > 12.0f && endingPhase == 2) endingPhase = 3;
+    if (endingTimer > 18.0f && endingPhase == 3) endingPhase = 4;
 }
 
 void Game::renderEnding() {
@@ -351,11 +397,31 @@ void Game::renderEnding() {
     if (endingPhase >= 2 && bodyFont) {
         float a2 = std::min((endingTimer - 6.0f) * 0.5f, 1.0f);
         Constants::Colors::Color c2 = {220, 210, 195, (unsigned char)(255 * a2)};
-        renderer.drawTextWrapped(
-            "Something stirs in the space you've drawn. Not a city this time.\n"
-            "Not a mountain or a river. Something that has no name yet.\n\n"
-            "It is vast. It is patient. And it knows your hand.",
-            180, 250, Constants::SCREEN_WIDTH - 360, c2, bodyFont);
+
+        int regionsDrawn = (int)livingMap.regions.size();
+        int labeled = 0;
+        float avgFidelity = 0;
+        for (auto& r : livingMap.regions) {
+            if (r.hasLabel) labeled++;
+            avgFidelity += r.fidelity;
+        }
+        if (regionsDrawn > 0) avgFidelity /= regionsDrawn;
+
+        std::string endText;
+        if (avgFidelity > 0.7f) {
+            endText = "Something stirs in the space you've drawn. Your lines were precise,\n"
+                      "your hand steady. What emerges is clear, defined, beautiful.\n\n"
+                      "It knows your hand. It trusts your hand.";
+        } else if (avgFidelity > 0.4f) {
+            endText = "Something stirs in the space you've drawn. Your lines wavered\n"
+                      "in places, but held. What emerges is real, if imperfect.\n\n"
+                      "It knows your hand. It forgives your hand.";
+        } else {
+            endText = "Something stirs in the space you've drawn. Your lines were rough,\n"
+                      "uncertain, shaped by fear and haste. What emerges is raw, jagged.\n\n"
+                      "It knows your hand. It mirrors your hand.";
+        }
+        renderer.drawTextWrapped(endText, 180, 250, Constants::SCREEN_WIDTH - 360, c2, bodyFont);
     }
 
     if (endingPhase >= 3 && bodyFont) {
@@ -364,9 +430,9 @@ void Game::renderEnding() {
         renderer.drawTextWrapped(
             "The void wasn't destroying the world.\n"
             "It was waiting to be drawn.\n\n"
-            "And now Sable must decide: does she finish the drawing?\n"
-            "Does she give form to something the world was wise\n"
-            "to leave undrawn?",
+            "Every shaky line, every forgotten label, every place you named\n"
+            "or left nameless -- it remembers. Your map is not just a tool.\n"
+            "It is a diary of how you felt when you passed through.",
             180, 390, Constants::SCREEN_WIDTH - 360, c3, bodyFont);
     }
 
@@ -378,8 +444,13 @@ void Game::renderEnding() {
         }
         if (smallFont) {
             Constants::Colors::Color hintC = {180, 170, 150, (unsigned char)(150 * a4)};
+
+            std::string stats = "Regions drawn: " + std::to_string(livingMap.regions.size()) +
+                "  |  Tiles revealed: " + std::to_string(livingMap.tilesRevealed) +
+                "  |  Void consumed: " + std::to_string(voidSystem.getConsumedCount());
+            renderer.drawTextCentered(stats, 600, hintC, smallFont);
             renderer.drawText("Thank you for playing the demo.",
-                Constants::SCREEN_WIDTH / 2 - 120, 620, hintC, smallFont);
+                Constants::SCREEN_WIDTH / 2 - 120, 630, hintC, smallFont);
         }
     }
 }
@@ -409,9 +480,24 @@ void Game::renderUI() {
         renderer.drawText(inkText, barX + 5, barY + 2, Constants::Colors::UI_TEXT, smallFont);
     }
 
-    // Controls hint (bottom left)
+    // Emotion indicator
+    emotions.renderIndicator(renderer, assets);
+
+    // Void threat level
+    if (smallFont && state == GameState::EXPLORE) {
+        float threat = voidSystem.getVoidThreatLevel(tileMap);
+        if (threat > 0.15f) {
+            unsigned char alpha = (unsigned char)(200 * std::min(threat * 3.0f, 1.0f));
+            float blink = sin(gameTime * 3.0f) * 0.3f + 0.7f;
+            alpha = (unsigned char)(alpha * blink);
+            renderer.drawText("The void advances...", 15, 65,
+                {245, 245, 250, alpha}, smallFont);
+        }
+    }
+
+    // Controls hint
     if (smallFont && state == GameState::EXPLORE && !dialogueSystem.isActive()) {
-        renderer.drawText("[WASD] Move  [E] Interact  [M] Map  [Esc] Quit",
+        renderer.drawText("[WASD] Move  [E] Interact  [M] Living Map  [Esc] Quit",
             10, Constants::SCREEN_HEIGHT - 25, {150, 140, 130, 150}, smallFont);
     }
 }
@@ -424,6 +510,31 @@ void Game::renderFade() {
     }
 }
 
+void Game::renderConsequenceNotification() {
+    if (consequenceTimer <= 0 || consequenceText.empty()) return;
+
+    TTF_Font* font = assets.getFont("dialogue");
+    if (!font) return;
+
+    float alpha = std::min(consequenceTimer, 1.0f);
+    int boxW = 500, boxH = 50;
+    int boxX = (Constants::SCREEN_WIDTH - boxW) / 2;
+    int boxY = Constants::SCREEN_HEIGHT / 2 - 120;
+
+    Constants::Colors::Color bg = Constants::Colors::UI_BG;
+    bg.a = (unsigned char)(bg.a * alpha);
+    renderer.fillRectAbsolute(boxX, boxY, boxW, boxH, bg);
+
+    Constants::Colors::Color border = Constants::Colors::FIDELITY_LOW;
+    border.a = (unsigned char)(border.a * alpha);
+    renderer.drawRectAbsolute(boxX, boxY, boxW, boxH, border);
+
+    Constants::Colors::Color textC = Constants::Colors::UI_TEXT;
+    textC.a = (unsigned char)(textC.a * alpha);
+    renderer.drawTextWrapped(consequenceText, boxX + 15, boxY + 10,
+        boxW - 30, textC, font);
+}
+
 void Game::startFadeTo(GameState next, float speed) {
     fadeTarget = 1.0f;
     fadeSpeed = speed;
@@ -434,10 +545,9 @@ void Game::startFadeTo(GameState next, float speed) {
 // --- NPC SETUP ---
 
 void Game::setupNPCs() {
-    // The Innkeeper - near the inn building (12,13)
     NPC innkeeper(14 * Constants::TILE_SIZE, 17.5f * Constants::TILE_SIZE,
                   "Maren (Innkeeper)", Constants::Colors::NPC_INNKEEPER);
-    innkeeper.inkReward = 20;
+    innkeeper.inkReward = 25;
     innkeeper.dialogue = {
         {"Maren", "Another day walking backward through this cursed town... "
          "Oh! A visitor? We don't get many of those. Not anymore.",
@@ -456,20 +566,21 @@ void Game::setupNPCs() {
 
         {"Maren", "It's not like fog or snow. It's... nothing. "
          "Pure nothing. My maps go blank near it. "
-         "Here -- take some of my ink. You'll need it more than I do.",
+         "But I've heard you can draw what isn't there yet.\n"
+         "Take my ink. Draw carefully -- what you put on paper becomes real.",
          Constants::Colors::NPC_INNKEEPER, {}, -1},
 
         {"Maren", "Oh, that. The town's been wrong since the void arrived. "
          "Tuesdays we walk backward. Wednesdays the well speaks. "
          "Thursdays... we don't talk about Thursdays.\n"
-         "Take this ink. Map that void before it maps us.",
+         "Take this ink. And remember: draw with care. "
+         "A hasty line makes a hasty place.",
          Constants::Colors::NPC_INNKEEPER, {}, -1}
     };
 
-    // The Lost Cartographer - near the workshop (30,14)
     NPC cartographer(31 * Constants::TILE_SIZE, 18.5f * Constants::TILE_SIZE,
                      "Edris (Cartographer)", Constants::Colors::NPC_CARTO);
-    cartographer.inkReward = 30;
+    cartographer.inkReward = 35;
     cartographer.dialogue = {
         {"Edris", "Sable? Is that... it IS you. "
          "They told me you were exiled. They told me you were mad.",
@@ -484,25 +595,30 @@ void Game::setupNPCs() {
 
         {"Edris", "No. None of ours can. The void doesn't exist yet, Sable. "
          "That's the trick. You can't map what isn't there.\n"
-         "But you... you mapped a city before it existed. "
-         "Maybe you can map this too.",
+         "But you... you mapped a city before it existed.\n"
+         "Use the Living Map. Press M. Draw shapes, place symbols, name places.\n"
+         "What you draw becomes real. The fidelity of your lines matters.",
          Constants::Colors::NPC_CARTO, {}, 4},
 
         {"Edris", "I know you can. I always believed you about the city. "
          "I just... I was too afraid to say so.\n"
-         "Take my ink reserves. All of them. You'll need every drop.",
+         "Take my ink reserves. All of them.\n"
+         "And Sable -- your emotions affect your drawing. "
+         "When you're afraid, your lines shake. When you grieve, you draw small.\n"
+         "Stay steady.",
          Constants::Colors::NPC_CARTO, {}, 4},
 
-        {"Edris", "Press M or Tab when you're near the void. "
-         "Enter mapping mode. Use your ink to draw what should be there.\n"
-         "Trust your instincts, Sable. Your maps have never been wrong.",
+        {"Edris", "The Living Map has three tools: shapes to draw terrain,\n"
+         "labels to name places, and symbols to mark features.\n"
+         "You can switch ink types with Q -- Memory ink for places consumed,\n"
+         "Emotion ink for places that need feeling to exist.\n"
+         "Trust your instincts, Sable.",
          Constants::Colors::NPC_CARTO, {}, -1}
     };
 
-    // The Child - near the town square
     NPC child(23 * Constants::TILE_SIZE, 21.5f * Constants::TILE_SIZE,
               "Lira (Child)", Constants::Colors::NPC_CHILD);
-    child.inkReward = 10;
+    child.inkReward = 15;
     child.dialogue = {
         {"Lira", "You can see it too, can't you? "
          "The shapes in the white?",
@@ -518,18 +634,21 @@ void Game::setupNPCs() {
         {"Lira", "Something that wants to be real. "
          "It's been waiting a very long time. "
          "It whispers sometimes. It says: 'draw me.'\n\n"
-         "...I think it's lonely.",
+         "...I think it's lonely. Maybe if you draw it with kindness,\n"
+         "it'll be kind back.",
          Constants::Colors::NPC_CHILD, {}, 4},
 
         {"Lira", "I can't stay away. It sings to me.\n"
          "Don't worry. It doesn't want to hurt us. "
          "It just wants someone to see it. "
-         "To make it real.",
+         "To make it real.\n"
+         "But draw it true, okay? Don't rush. It deserves a good shape.",
          Constants::Colors::NPC_CHILD, {}, 4},
 
         {"Lira", "Here. I found this ink by the void's edge. "
          "It was just... sitting there. Like a gift.\n"
-         "I think it wants you to have it.",
+         "I think it wants you to have it. "
+         "It's special ink -- it remembers things.",
          Constants::Colors::NPC_CHILD, {}, -1}
     };
 
@@ -551,5 +670,3 @@ NPC* Game::getNearestInteractableNPC() {
     }
     return nearest;
 }
-
-void Game::setupIntroDialogue() {}

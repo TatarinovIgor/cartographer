@@ -44,12 +44,13 @@ set(SOURCES
     src/Camera.cpp
     src/Player.cpp
     src/TileMap.cpp
-    src/MappingSystem.cpp
+    src/LivingMap.cpp
     src/DialogueSystem.cpp
     src/VoidSystem.cpp
     src/NPC.cpp
     src/AssetManager.cpp
     src/ParticleSystem.cpp
+    src/EmotionSystem.cpp
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES})

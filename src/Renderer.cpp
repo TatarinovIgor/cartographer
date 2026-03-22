@@ -1,5 +1,6 @@
 #include "Renderer.h"
 #include <vector>
+#include <cmath>
 
 bool Renderer::init(SDL_Window* window) {
     renderer = SDL_CreateRenderer(window, -1,
@@ -47,6 +48,46 @@ void Renderer::drawRectAbsolute(int x, int y, int w, int h, Constants::Colors::C
     SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
     SDL_Rect r = {x, y, w, h};
     SDL_RenderDrawRect(renderer, &r);
+}
+
+void Renderer::drawLine(float x1, float y1, float x2, float y2, Constants::Colors::Color c) {
+    SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
+    SDL_RenderDrawLine(renderer, (int)x1, (int)y1, (int)x2, (int)y2);
+}
+
+void Renderer::drawLineThick(float x1, float y1, float x2, float y2,
+                               int thickness, Constants::Colors::Color c) {
+    SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
+    for (int i = -thickness/2; i <= thickness/2; i++) {
+        SDL_RenderDrawLine(renderer, (int)x1, (int)y1 + i, (int)x2, (int)y2 + i);
+        SDL_RenderDrawLine(renderer, (int)x1 + i, (int)y1, (int)x2 + i, (int)y2);
+    }
+}
+
+void Renderer::drawCircle(float cx, float cy, float radius, Constants::Colors::Color c) {
+    SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
+    int x = (int)radius, y = 0, err = 1 - x;
+    while (x >= y) {
+        SDL_RenderDrawPoint(renderer, (int)cx + x, (int)cy + y);
+        SDL_RenderDrawPoint(renderer, (int)cx - x, (int)cy + y);
+        SDL_RenderDrawPoint(renderer, (int)cx + x, (int)cy - y);
+        SDL_RenderDrawPoint(renderer, (int)cx - x, (int)cy - y);
+        SDL_RenderDrawPoint(renderer, (int)cx + y, (int)cy + x);
+        SDL_RenderDrawPoint(renderer, (int)cx - y, (int)cy + x);
+        SDL_RenderDrawPoint(renderer, (int)cx + y, (int)cy - x);
+        SDL_RenderDrawPoint(renderer, (int)cx - y, (int)cy - x);
+        y++;
+        if (err < 0) { err += 2 * y + 1; }
+        else { x--; err += 2 * (y - x) + 1; }
+    }
+}
+
+void Renderer::fillCircle(float cx, float cy, float radius, Constants::Colors::Color c) {
+    SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
+    for (int dy = -(int)radius; dy <= (int)radius; dy++) {
+        int dx = (int)sqrt(radius * radius - dy * dy);
+        SDL_RenderDrawLine(renderer, (int)cx - dx, (int)cy + dy, (int)cx + dx, (int)cy + dy);
+    }
 }
 
 void Renderer::drawText(const std::string& text, int x, int y,

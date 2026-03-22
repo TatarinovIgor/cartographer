@@ -5,12 +5,13 @@
 #include "Camera.h"
 #include "Player.h"
 #include "TileMap.h"
-#include "MappingSystem.h"
+#include "LivingMap.h"
 #include "DialogueSystem.h"
 #include "VoidSystem.h"
 #include "NPC.h"
 #include "ParticleSystem.h"
 #include "AssetManager.h"
+#include "EmotionSystem.h"
 #include <vector>
 
 enum class GameState {
@@ -33,11 +34,12 @@ private:
     Camera camera;
     Player player;
     TileMap tileMap;
-    MappingSystem mappingSystem;
+    LivingMap livingMap;
     DialogueSystem dialogueSystem;
     VoidSystem voidSystem;
     ParticleSystem particles;
     AssetManager assets;
+    EmotionSystem emotions;
     std::vector<NPC> npcs;
 
     GameState state = GameState::INTRO;
@@ -64,6 +66,10 @@ private:
     // Ink mote timer
     float inkMoteTimer = 0;
 
+    // Consequence notification
+    float consequenceTimer = 0;
+    std::string consequenceText;
+
     void update(float dt);
     void render();
 
@@ -81,10 +87,10 @@ private:
 
     void renderUI();
     void renderFade();
+    void renderConsequenceNotification();
 
     void startFadeTo(GameState next, float speed = 1.5f);
     void setupNPCs();
-    void setupIntroDialogue();
 
     std::vector<std::string> getIntroTexts() const;
     NPC* getNearestInteractableNPC();

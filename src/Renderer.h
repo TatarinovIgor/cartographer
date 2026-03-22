@@ -17,6 +17,11 @@ public:
     void fillRectAbsolute(int x, int y, int w, int h, Constants::Colors::Color c);
     void drawRectAbsolute(int x, int y, int w, int h, Constants::Colors::Color c);
 
+    void drawLine(float x1, float y1, float x2, float y2, Constants::Colors::Color c);
+    void drawLineThick(float x1, float y1, float x2, float y2, int thickness, Constants::Colors::Color c);
+    void drawCircle(float cx, float cy, float radius, Constants::Colors::Color c);
+    void fillCircle(float cx, float cy, float radius, Constants::Colors::Color c);
+
     void drawText(const std::string& text, int x, int y, Constants::Colors::Color c, TTF_Font* font);
     void drawTextCentered(const std::string& text, int y, Constants::Colors::Color c, TTF_Font* font);
     void drawTextWrapped(const std::string& text, int x, int y, int maxW, Constants::Colors::Color c, TTF_Font* font);
